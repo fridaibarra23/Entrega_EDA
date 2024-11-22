@@ -1,0 +1,202 @@
+# %%
+# Librerías
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from termcolor import colored, cprint
+import category_encoders as ce
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import StandardScaler
+import warnings
+import sys
+
+pd.set_option('display.max_columns', 500)
+pd.set_option('display.max_rows', 500)
+
+# %% [markdown]
+# ### Importación de Funciones
+
+# %%
+#Funciones
+import sys
+sys.path.append('../src')  # Asegúrate de que ../src es la carpeta donde está Funciones_Ayuda.py
+import Funciones_Ayuda as fa  # Ahora debería importarse correctamente
+sys.path.remove('../src')
+
+#Semilla 
+seed = 25
+
+# %% [markdown]
+# ### Importación de Data Set
+
+# %%
+df_loans_train = pd.read_csv('../data/interim/df_loans_train.csv')
+df_loans_test = pd.read_csv('../data/interim/df_loans_test.csv')
+df_loans_train.head()
+
+# %%
+# Se va a eliminar la primera columna que repite el Index
+df_loans_train = df_loans_train.drop('Unnamed: 0',axis=1)
+df_loans_test = df_loans_test.drop('Unnamed: 0',axis=1)
+
+# %%
+# Diccionario de los datos:
+var_description = pd.read_excel('../data/columns_description.xlsx')
+
+
+# %%
+# Llamar a la función y guardar los resultados en variables
+col_bool, col_cat, col_num = fa.categorizar_columnas(df_loans_train)
+
+# %% [markdown]
+# ### Codificación de Variables
+
+# %%
+cat_vars = df_loans_train.select_dtypes(include=['object']).columns
+
+# Contar valores únicos en cada variable categórica
+unique_counts = df_loans_train[cat_vars].nunique()
+
+print(unique_counts)
+
+# %% [markdown]
+# Después de analizar el número de valores únicos de las variables categóricas y su impacto en la variable objetivo, estableceré los siguientes criterios de encoding:
+# 
+# Baja cardinalidad (≤ 8 categorías): Se usará One-Hot Encoding, ya que es eficiente para variables con pocas categorías y no añade complejidad innecesaria al modelo.
+# 
+# Media cardinalidad (9-50 categorías): No se aplicará Target Encoding debido a que las variables en este rango no muestran un impacto significativo en la relación con la variable objetivo, por lo que no justifica su uso.
+# 
+# En su lugar:
+# Para la variable OCCUPATION_TYPE (18 categorías), se aplicará Mean Encoding, ya que permite capturar de manera eficiente la relación promedio entre cada categoría y la variable objetivo.
+# 
+# Alta cardinalidad (> 50 categorías): Se aplicará CatBoost Encoding para la variable ORGANIZATION_TYPE (58 categorías), una técnica adecuada para manejar variables de alta cardinalidad reduciendo el riesgo de overfitting.
+# 
+# Este enfoque busca balancear la complejidad del modelo y la relevancia de las variables categóricas, maximizando el desempeño general del modelo.            
+
+# %% [markdown]
+# #### Se va a separar de nuevo en Train y Test 
+
+# %%
+y_train = df_loan_train['TARGET']
+X_train = df_loan_train.drop('TARGET', axis=1)
+y_test = df_loan_test['TARGET']
+X_test = df_loan_test.drop('TARGET', axis=1)
+
+X_train.shape, y_train.shape, X_test.shape, y_test.shape
+
+# %% [markdown]
+# #### CODIFICACIÓN DE ONE HOT ENCODING 
+
+# %%
+list_columns_cat = list(df_loans_train.select_dtypes(include=["object", "category"]).columns)
+exclude_vars = ['OCCUPATION_TYPE', 'ORGANIZATION_TYPE']  # Excluir estas columnas
+list_columns_ohe = [col for col in list_columns_cat if col not in exclude_vars]
+
+# Crear y aplicar One-Hot Encoder
+ohe = ce.OneHotEncoder(cols=list_columns_ohe, use_cat_names=True)
+ohe.fit(X_train, y_train)  
+
+# Transformar X_train y X_test
+X_train_t = ohe.transform(X_train)
+X_test_t = ohe.transform(X_test)
+
+# Verificar formas finales
+print(X_train_t.shape, X_test_t.shape)
+
+# %% [markdown]
+# #### CODIFIACIÓN MEAN ENCODING
+
+# %%
+# Mean Encoding para OCCUPATION_TYPE
+target_column = 'OCCUPATION_TYPE'
+
+# Calcular el promedio de 'TARGET' por cada categoría de 'OCCUPATION_TYPE'
+mean_encoding_map = X_train_t.copy()
+mean_encoding_map['TARGET'] = y_train  # Añadimos la variable TARGET al DataFrame
+mean_encoding_map = mean_encoding_map.groupby(target_column)['TARGET'].mean().to_dict()
+
+# Aplicar Mean Encoding a X_train y X_test
+X_train_me = X_train_t.copy()
+X_test_me = X_test_t.copy()
+
+X_train_me[target_column] = X_train_t[target_column].map(mean_encoding_map)
+X_test_me[target_column] = X_test_t[target_column].map(mean_encoding_map).fillna(y_train.mean())
+
+# Verificar formas finales
+print(X_train_me.shape, X_test_me.shape)
+
+# %%
+# CatBoost Encoding
+
+target_column = 'ORGANIZATION_TYPE'
+
+# Crear y ajustar el codificador de CatBoost Encoding
+catboost_enc = ce.CatBoostEncoder(cols=[target_column])
+catboost_enc.fit(X_train_me[target_column], y_train)  
+
+# Transformar X_train y X_test
+X_train_mec = X_train_me.copy()
+X_test_mec = X_test_me.copy()
+
+X_train_mec[target_column] = catboost_enc.transform(X_train_me[target_column])
+X_test_mec[target_column] = catboost_enc.transform(X_test_me[target_column])
+
+# Verificar formas finales
+print(X_train_mec.shape, X_test_mec.shape)
+
+# %%
+X_train_mec.dtypes.to_dict()
+
+# %% [markdown]
+# #### ESCALADO DE VARIABLES
+
+# %%
+scaler = StandardScaler()
+model_scaled = scaler.fit(X_train_mec)
+X_train_scaled = pd.DataFrame(scaler.transform(X_train_mec), columns=X_train_mec.columns, index=X_train_mec.index)
+X_test_scaled = pd.DataFrame(scaler.transform(X_test_mec), columns=X_test_mec.columns, index=X_test_mec.index)
+
+# %%
+X_train_scaled  = X_train_scaled.drop('Unnamed: 0',axis=1)
+X_test_scaled = X_test_scaled.drop('Unnamed: 0',axis=1)
+
+# %%
+X_train_scaled.head()
+
+# %%
+X_train_scaled.describe()
+
+# %%
+X_test_scaled.head()
+
+# %%
+X_test_scaled.describe()
+
+# %% [markdown]
+# #### CONCLUSIONES FINALES DEL EDA
+# 
+# A continuación, se presenta un resumen de lo realizado hasta el momento:
+# 
+# Exploración y análisis inicial (EDA): Comenzamos con un análisis exploratorio para comprender el tamaño y las características de nuestro conjunto de datos, prestando especial atención a la variable objetivo, TARGET, y sus relaciones con las demás variables.
+# 
+# Análisis de tipos de variables: Analizamos las variables en términos de su tipo (categóricas, numéricas, etc.) y evaluamos cómo se relacionan con la variable objetivo. Esto nos ayudó a determinar qué técnicas de codificación eran más adecuadas para cada tipo de variable.
+# 
+# Análisis de correlación: Estudiamos las relaciones de correlación entre las variables para identificar posibles redundancias y relaciones lineales importantes que podrían influir en la selección de características.
+# 
+# División en conjuntos de entrenamiento y prueba: Realizamos una división estratificada de los datos en conjuntos de entrenamiento y prueba, asegurando que la distribución de la variable objetivo se mantuviera en ambas particiones.
+# 
+# Tratamiento de outliers: Detectamos y tratamos los valores atípicos en las variables numéricas, asegurándonos de que no afectaran negativamente al modelo.
+# 
+# Imputación de valores faltantes: Abordamos los valores nulos en el conjunto de datos mediante técnicas de imputación adecuadas, garantizando que las variables estuvieran completas para el entrenamiento del modelo.
+# 
+# Análisis WoE e IV: Aplicamos el análisis de Weight of Evidence (WoE) y la Información de Valor (IV) a las variables categóricas para medir su capacidad predictiva y determinar qué variables serían más útiles para el modelado.
+# 
+# Codificación de variables categóricas: Utilizamos técnicas de codificación numérica como One-Hot Encoding, Mean Encoding y CatBoost Encoding para transformar las variables categóricas en valores numéricos adecuados para los modelos.
+# 
+# Escalado de variables: Procedimos con el escalado de las variables numéricas para asegurar que todas las características tuvieran un rango similar y fueran adecuadamente procesadas por los modelos de Machine Learning.
+# 
+# Con estos pasos completados, nuestros datos están listos para continuar con las siguientes fases del proyecto: la selección de características (feature processing), la construcción y evaluación de modelos, la implementación del modelo final, y la explicación y conclusiones del trabajo realizado.
+
+
